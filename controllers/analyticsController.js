@@ -1,9 +1,11 @@
 const {
+  sequelize,
   Employee,
   Comment,
   CommentReaction,
   EmployeeView,
 } = require('../models');
+
 
 const REACTION_TYPES = CommentReaction.REACTION_TYPES;
 
@@ -24,38 +26,53 @@ function statsToCounts(stats) {
   };
 }
 
+
 // GET /api/analytics/employees
 exports.getEmployeesAnalytics = async (req, res, next) => {
   try {
-    const [employees, views, comments, reactions] = await Promise.all([
-      Employee.findAll({ order: [['id', 'ASC']] }),
-      EmployeeView.findAll({ attributes: ['employeeId'] }),
-      Comment.findAll({ attributes: ['id', 'employeeId'] }),
-      CommentReaction.findAll({ attributes: ['commentId', 'type'] }),
+    // DB-side aggregation to avoid loading entire tables in Node.
+    const [employees, viewsAgg, commentsAgg, reactionsAgg] = await Promise.all([
+      Employee.findAll({ order: [['id', 'ASC']], attributes: ['id', 'fullName', 'position'] }),
+
+      EmployeeView.findAll({
+        attributes: ['employeeId', [sequelize.fn('COUNT', sequelize.col('id')), 'viewsCount']],
+        group: ['employeeId'],
+        raw: true,
+      }),
+
+      Comment.findAll({
+        attributes: ['employeeId', [sequelize.fn('COUNT', sequelize.col('id')), 'commentsCount']],
+        group: ['employeeId'],
+        raw: true,
+      }),
+
+      // reactions -> comment -> employee mapping
+      sequelize.query(
+        `SELECT c.employee_id AS "employeeId", cr.type AS "type", COUNT(cr.id)::int AS "count"
+         FROM comment_reactions cr
+         JOIN comments c ON c.id = cr.comment_id
+         GROUP BY c.employee_id, cr.type`,
+        { type: sequelize.QueryTypes.SELECT }
+      ),
     ]);
 
-    // Maps for fast aggregation
     const viewsByEmployee = {};
-    views.forEach((v) => {
-      viewsByEmployee[v.employeeId] = (viewsByEmployee[v.employeeId] || 0) + 1;
+    viewsAgg.forEach((r) => {
+      viewsByEmployee[r.employeeId] = Number(r.viewsCount) || 0;
     });
 
     const commentsByEmployee = {};
-    const commentToEmployee = {};
-    comments.forEach((c) => {
-      commentToEmployee[c.id] = c.employeeId;
-      commentsByEmployee[c.employeeId] =
-        (commentsByEmployee[c.employeeId] || 0) + 1;
+    commentsAgg.forEach((r) => {
+      commentsByEmployee[r.employeeId] = Number(r.commentsCount) || 0;
     });
 
     const reactionStatsByEmployee = {};
-    reactions.forEach((r) => {
-      const employeeId = commentToEmployee[r.commentId];
-      if (employeeId == null) return;
-      if (!reactionStatsByEmployee[employeeId]) {
+    reactionsAgg.forEach((r) => {
+      const employeeId = r.employeeId;
+      if (reactionStatsByEmployee[employeeId] == null) {
         reactionStatsByEmployee[employeeId] = emptyReactionStats();
       }
-      reactionStatsByEmployee[employeeId][r.type] += 1;
+      reactionStatsByEmployee[employeeId][r.type] = Number(r.count) || 0;
     });
 
     const data = employees.map((emp) => {
@@ -80,6 +97,7 @@ exports.getEmployeesAnalytics = async (req, res, next) => {
   }
 };
 
+
 // GET /api/analytics/employees/:employeeId
 exports.getEmployeeAnalytics = async (req, res, next) => {
   try {
@@ -92,23 +110,30 @@ exports.getEmployeeAnalytics = async (req, res, next) => {
         .json({ success: false, message: 'Employee not found' });
     }
 
-    const employeeComments = await Comment.findAll({
-      where: { employeeId },
-      attributes: ['id'],
-    });
-    const commentIds = employeeComments.map((c) => c.id);
+    // Production perf: avoid building a large commentIds array and doing IN (...) queries.
+    // Use SQL aggregation / join to compute reaction stats and counts for this employee.
 
-    const [viewsCount, commentsCount, reactions] = await Promise.all([
+    const [viewsCount, commentsCount, reactionAgg] = await Promise.all([
       EmployeeView.count({ where: { employeeId } }),
       Comment.count({ where: { employeeId } }),
-      commentIds.length
-        ? CommentReaction.findAll({ where: { commentId: commentIds } })
-        : Promise.resolve([]),
+      sequelize.query(
+        `SELECT cr.type AS "type", COUNT(cr.id)::int AS "count"
+         FROM comment_reactions cr
+         JOIN comments c ON c.id = cr.comment_id
+         WHERE c.employee_id = :employeeId
+         GROUP BY cr.type`,
+        {
+          type: sequelize.QueryTypes.SELECT,
+          replacements: { employeeId: Number(employeeId) },
+        }
+      ),
     ]);
 
     const reactionStats = emptyReactionStats();
-    reactions.forEach((r) => {
-      reactionStats[r.type] += 1;
+    let reactionsCount = 0;
+    reactionAgg.forEach((r) => {
+      reactionStats[r.type] = Number(r.count) || 0;
+      reactionsCount += Number(r.count) || 0;
     });
 
     const [recentViews, recentComments, recentReactions] = await Promise.all([
@@ -122,16 +147,18 @@ exports.getEmployeeAnalytics = async (req, res, next) => {
         order: [['commented_at', 'DESC']],
         limit: 10,
       }),
-      commentIds.length
-        ? CommentReaction.findAll({
-            where: { commentId: commentIds },
-            order: [['reacted_at', 'DESC']],
-            limit: 10,
-            include: [
-              { model: Comment, as: 'comment', attributes: ['id', 'text'] },
-            ],
-          })
-        : Promise.resolve([]),
+      CommentReaction.findAll({
+        order: [['reactedAt', 'DESC']],
+        limit: 10,
+        include: [
+          {
+            model: Comment,
+            as: 'comment',
+            attributes: ['id', 'text'],
+            where: { employeeId: Number(employeeId) },
+          },
+        ],
+      }),
     ]);
 
     res.json({
@@ -140,7 +167,7 @@ exports.getEmployeeAnalytics = async (req, res, next) => {
         employee,
         viewsCount,
         commentsCount,
-        reactionsCount: reactions.length,
+        reactionsCount,
         reactionStats,
         recentViews,
         recentComments,
@@ -152,20 +179,30 @@ exports.getEmployeeAnalytics = async (req, res, next) => {
   }
 };
 
+
 // GET /api/analytics/comments
 exports.getCommentsAnalytics = async (req, res, next) => {
   try {
-    const [comments, reactions] = await Promise.all([
-      Comment.findAll({ order: [['id', 'ASC']] }),
-      CommentReaction.findAll({ attributes: ['commentId', 'type'] }),
+    // DB-side aggregation to avoid loading all reactions in Node.
+    const [comments, reactionsAgg] = await Promise.all([
+      Comment.findAll({
+        order: [['id', 'ASC']],
+        attributes: ['id', 'employeeId', 'authorName', 'text'],
+      }),
+      sequelize.query(
+        `SELECT cr.comment_id AS "commentId", cr.type AS "type", COUNT(cr.id)::int AS "count"
+         FROM comment_reactions cr
+         GROUP BY cr.comment_id, cr.type`,
+        { type: sequelize.QueryTypes.SELECT }
+      ),
     ]);
 
     const statsByComment = {};
-    reactions.forEach((r) => {
-      if (!statsByComment[r.commentId]) {
+    reactionsAgg.forEach((r) => {
+      if (statsByComment[r.commentId] == null) {
         statsByComment[r.commentId] = emptyReactionStats();
       }
-      statsByComment[r.commentId][r.type] += 1;
+      statsByComment[r.commentId][r.type] = Number(r.count) || 0;
     });
 
     const data = comments.map((c) => {
@@ -186,6 +223,7 @@ exports.getCommentsAnalytics = async (req, res, next) => {
     next(err);
   }
 };
+
 
 // GET /api/analytics/history
 exports.getHistory = async (req, res, next) => {

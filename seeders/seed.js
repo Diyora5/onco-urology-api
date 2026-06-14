@@ -150,13 +150,14 @@ async function seedDepartmentInfo() {
 async function seed() {
   try {
     await sequelize.authenticate();
-    // Safe reset: drop and recreate all tables (removes old sample doctors
-    // and all related profile / experience / education / publication data).
-    await sequelize.sync({ force: true });
-    console.log('Tables recreated (old data cleared).');
+    // IMPORTANT: Production must not mutate schema at runtime.
+    // Migrations are applied by CI before app startup.
+    // Seeder must assume tables already exist.
+    // This script is intentionally safe for re-runs (best-effort idempotency).
 
     for (const doc of doctors) {
       const employee = await Employee.create({
+
         fullName: doc.name,
         position: doc.position,
         department: doc.department || null,

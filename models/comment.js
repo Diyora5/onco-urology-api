@@ -4,6 +4,7 @@ const sequelize = require('../config/database');
 const Comment = sequelize.define(
   'Comment',
   {
+
     id: {
       type: DataTypes.INTEGER,
       primaryKey: true,
@@ -40,7 +41,17 @@ const Comment = sequelize.define(
     tableName: 'comments',
     timestamps: true,
     underscored: true,
+    indexes: [
+      // Use DB column names since this project already maps fields via `underscored: true` and `field`.
+      { fields: ['employee_id'] },
+      { fields: ['commented_at'] },
+      // Used by commentController.getCommentsByEmployee ordering.
+      { fields: ['created_at'] },
+    ],
   }
 );
+
+
+
 
 module.exports = Comment;

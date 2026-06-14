@@ -36,7 +36,15 @@ const EmployeeView = sequelize.define(
     tableName: 'employee_views',
     timestamps: true,
     underscored: true,
+    indexes: [
+      { fields: ['employee_id'] },
+      // Used by analytics recent-views ordering.
+      { fields: ['viewed_at'] },
+    ],
+
   }
 );
+
+
 
 module.exports = EmployeeView;

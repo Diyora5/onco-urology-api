@@ -42,8 +42,18 @@ const CommentReaction = sequelize.define(
     tableName: 'comment_reactions',
     timestamps: true,
     underscored: true,
+    indexes: [
+      { fields: ['comment_id'] },
+      // Speeds up grouping by type and deletes scoped by (commentId).
+      { fields: ['comment_id', 'type'] },
+      // Used by analytics recent-reactions ordering.
+      { fields: ['reacted_at'] },
+    ],
   }
 );
+
+
+
 
 CommentReaction.REACTION_TYPES = REACTION_TYPES;
 

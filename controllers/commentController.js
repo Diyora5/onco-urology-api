@@ -1,5 +1,7 @@
 const { Employee, Comment, CommentReaction } = require('../models');
 const { getVisitorInfo } = require('../utils/visitor');
+// (Request validation is performed at the route-level middleware.)
+
 
 // POST /api/employees/:employeeId/comments
 exports.createComment = async (req, res, next) => {
@@ -7,14 +9,8 @@ exports.createComment = async (req, res, next) => {
     const { employeeId } = req.params;
     const { authorName, text } = req.body;
 
-    if (!authorName || !text) {
-      return res.status(400).json({
-        success: false,
-        message: 'authorName and text are required',
-      });
-    }
-
     const employee = await Employee.findByPk(employeeId);
+
     if (!employee) {
       return res
         .status(404)
